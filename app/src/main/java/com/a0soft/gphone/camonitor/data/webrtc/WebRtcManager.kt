@@ -34,8 +34,8 @@ class WebRtcManager(private val context: Context) {
     private var localRenderer: SurfaceViewRenderer? = null
 
     // Active PeerConnections mapped by peerId (max 2 for PA)
-    private val peerConnections = mutableMapOf<String, PeerConnection>()
-    private val dataChannels = mutableMapOf<String, DataChannel>()
+    private val peerConnections = java.util.concurrent.ConcurrentHashMap<String, PeerConnection>()
+    private val dataChannels = java.util.concurrent.ConcurrentHashMap<String, DataChannel>()
 
     // Flows
     private val _incomingIceCandidates = MutableSharedFlow<Pair<String, IceCandidate>>(extraBufferCapacity = 32)
@@ -63,7 +63,7 @@ class WebRtcManager(private val context: Context) {
     // Receiver state (PB & PA)
     private var remoteVideoTrack: VideoTrack? = null
     private var remoteAudioTrack: AudioTrack? = null
-    private val remoteAudioTracks = mutableMapOf<String, AudioTrack>()
+    private val remoteAudioTracks = java.util.concurrent.ConcurrentHashMap<String, AudioTrack>()
     private var isRemoteAudioEnabled = false
     private var remoteRenderer: SurfaceViewRenderer? = null
     @Volatile
@@ -86,10 +86,31 @@ class WebRtcManager(private val context: Context) {
     private var viewerAudioTrack: AudioTrack? = null
     private var isPttActive = false
 
-    private val iceServers = listOf(
+    private val defaultIceServers = listOf(
         PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
         PeerConnection.IceServer.builder("stun:stun1.l.google.com:19302").createIceServer()
     )
+
+    private fun buildIceServers(): List<PeerConnection.IceServer> {
+        val servers = defaultIceServers.toMutableList()
+        try {
+            val turnConfig = com.a0soft.gphone.camonitor.CamMonitorApp.instance.securityRepository.getTurnServerConfig()
+            if (turnConfig.isConfigured) {
+                val urls = turnConfig.url.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+                if (urls.isNotEmpty()) {
+                    val builder = PeerConnection.IceServer.builder(urls)
+                    if (turnConfig.username.isNotBlank()) {
+                        builder.setUsername(turnConfig.username)
+                        builder.setPassword(turnConfig.credential)
+                    }
+                    servers.add(builder.createIceServer())
+                }
+            }
+        } catch (e: Exception) {
+            AppLogger.w(tag, "Failed loading custom TURN server config: ${e.message}")
+        }
+        return servers
+    }
 
     init {
         initPeerConnectionFactory()
@@ -329,63 +350,7 @@ class WebRtcManager(private val context: Context) {
     }
 
     fun setTorch(enabled: Boolean): Boolean {
-        cameraXCapturer?.let {
-            return it.setTorch(enabled)
-        }
-        val capturer = videoCapturer ?: return false
-        return try {
-            val cameraCapturerClass = capturer.javaClass.superclass ?: Class.forName("org.webrtc.CameraCapturer")
-            val sessionField = cameraCapturerClass.getDeclaredField("currentSession").apply {
-                isAccessible = true
-            }
-            val session = sessionField.get(capturer) ?: return false
-            val sessionClass = session.javaClass
-
-            val deviceField = sessionClass.getDeclaredField("cameraDevice").apply { isAccessible = true }
-            val sessionCaptureField = sessionClass.getDeclaredField("captureSession").apply { isAccessible = true }
-            val surfaceField = sessionClass.getDeclaredField("surface").apply { isAccessible = true }
-            val handlerField = sessionClass.getDeclaredField("cameraThreadHandler").apply { isAccessible = true }
-            val captureFormatField = sessionClass.getDeclaredField("captureFormat").apply { isAccessible = true }
-            val fpsUnitFactorField = sessionClass.getDeclaredField("fpsUnitFactor").apply { isAccessible = true }
-
-            val cameraDevice = deviceField.get(session) as? CameraDevice ?: return false
-            val captureSession = sessionCaptureField.get(session) as? CameraCaptureSession ?: return false
-            val surface = surfaceField.get(session) as? Surface ?: return false
-            val handler = handlerField.get(session) as? Handler ?: return false
-            val captureFormat = captureFormatField.get(session) as? CameraEnumerationAndroid.CaptureFormat
-            val fpsUnitFactor = fpsUnitFactorField.getInt(session)
-
-            handler.post {
-                try {
-                    val builder = cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
-                    if (captureFormat != null && fpsUnitFactor > 0) {
-                        val fpsRange = Range(
-                            captureFormat.framerate.min / fpsUnitFactor,
-                            captureFormat.framerate.max / fpsUnitFactor
-                        )
-                        builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRange)
-                    }
-                    builder.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
-                    builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
-                    builder.set(CaptureRequest.CONTROL_AE_LOCK, false)
-                    builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
-                    if (enabled) {
-                        builder.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_TORCH)
-                    } else {
-                        builder.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
-                    }
-                    builder.addTarget(surface)
-                    captureSession.setRepeatingRequest(builder.build(), null, handler)
-                    AppLogger.i(tag, "Torch mode successfully updated on active Camera2Session: enabled=$enabled")
-                } catch (e: Exception) {
-                    AppLogger.e(tag, "Failed to update torch on active Camera2Session", e)
-                }
-            }
-            true
-        } catch (e: Exception) {
-            AppLogger.w(tag, "Failed accessing Camera2Session for torch: ${e.message}")
-            false
-        }
+        return cameraXCapturer?.setTorch(enabled) ?: false
     }
 
     // ----------------------------------------------------
@@ -398,9 +363,10 @@ class WebRtcManager(private val context: Context) {
             return null
         }
         closePeer(peerId, keepPendingCandidates = true)
-        AppLogger.i(tag, "Creating new PeerConnection for $peerId with ${iceServers.size} ICE servers")
+        val activeIceServers = buildIceServers()
+        AppLogger.i(tag, "Creating new PeerConnection for $peerId with ${activeIceServers.size} ICE servers")
 
-        val rtcConfig = PeerConnection.RTCConfiguration(iceServers).apply {
+        val rtcConfig = PeerConnection.RTCConfiguration(activeIceServers).apply {
             sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
             continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
         }

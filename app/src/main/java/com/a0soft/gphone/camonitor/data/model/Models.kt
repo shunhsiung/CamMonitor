@@ -314,6 +314,18 @@ sealed class ControlCommand {
 }
 
 /**
+ * Custom TURN / STUN server configuration for NAT traversal across symmetric carrier NATs.
+ */
+data class TurnServerConfig(
+    val url: String = "",
+    val username: String = "",
+    val credential: String = ""
+) {
+    val isConfigured: Boolean
+        get() = url.trim().isNotEmpty()
+}
+
+/**
  * Log entry for diagnostics.
  */
 enum class LogLevel {
@@ -327,8 +339,13 @@ data class LogEntry(
     val message: String
 ) {
     fun format(): String {
-        val sdf = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US)
-        val time = sdf.format(java.util.Date(timestamp))
+        val time = LOG_TIME_FORMATTER.format(java.time.Instant.ofEpochMilli(timestamp))
         return "[$time] [${level.name}] [$tag] $message"
+    }
+
+    companion object {
+        private val LOG_TIME_FORMATTER: java.time.format.DateTimeFormatter =
+            java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US)
+                .withZone(java.time.ZoneId.systemDefault())
     }
 }

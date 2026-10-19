@@ -27,7 +27,12 @@ class MultiCameraTestSecurityRepository : SecurityRepository {
     override fun getPairedDevices(): List<PairedDevice> = pairedDevices.toList()
 
     override fun addPairedDevice(device: PairedDevice, maxLimit: Int): Boolean {
-        if (pairedDevices.size >= maxLimit && pairedDevices.none { it.deviceId == device.deviceId }) {
+        val sameRoleCount = when (device.role) {
+            "VIEWER" -> pairedDevices.count { it.role != "CAMERA" }
+            "CAMERA" -> pairedDevices.count { it.role != "VIEWER" }
+            else -> pairedDevices.size
+        }
+        if (sameRoleCount >= maxLimit && pairedDevices.none { it.deviceId == device.deviceId }) {
             return false
         }
         pairedDevices.removeAll { it.deviceId == device.deviceId }
@@ -194,5 +199,28 @@ class MultiCameraPairingTest {
         assertTrue(viewers.any { it.deviceId == "viewer-1" })
         assertTrue(viewers.any { it.deviceId == "legacy-1" })
         assertFalse(viewers.any { it.deviceId == "cam-1" })
+    }
+
+    @Test
+    fun dualRoleDevice_canPairCamerasAndViewersIndependently() {
+        // Pair 3 cameras first
+        for (i in 1..3) {
+            val cam = PairedDevice("cam-$i", "Cam $i", "pub-c$i", 1000L * i, role = "CAMERA")
+            assertTrue(repository.addPairedDevice(cam, maxLimit = SecurityRepository.MAX_PAIRED_CAMERAS))
+        }
+        assertEquals(3, repository.getPairedCameras().size)
+        assertEquals(0, repository.getPairedViewers().size)
+
+        // Now pair up to 2 viewers (should succeed even though total devices > 2)
+        val v1 = PairedDevice("viewer-1", "Viewer 1", "pub-v1", 5000L, role = "VIEWER")
+        val v2 = PairedDevice("viewer-2", "Viewer 2", "pub-v2", 6000L, role = "VIEWER")
+        val v3 = PairedDevice("viewer-3", "Viewer 3", "pub-v3", 7000L, role = "VIEWER")
+
+        assertTrue("1st viewer should succeed despite 3 paired cameras", repository.addPairedDevice(v1, maxLimit = SecurityRepository.MAX_PAIRED_VIEWERS))
+        assertTrue("2nd viewer should succeed despite 3 paired cameras", repository.addPairedDevice(v2, maxLimit = SecurityRepository.MAX_PAIRED_VIEWERS))
+        assertFalse("3rd viewer should be rejected by MAX_PAIRED_VIEWERS=2", repository.addPairedDevice(v3, maxLimit = SecurityRepository.MAX_PAIRED_VIEWERS))
+
+        assertEquals(3, repository.getPairedCameras().size)
+        assertEquals(2, repository.getPairedViewers().size)
     }
 }

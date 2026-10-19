@@ -1,4 +1,4 @@
-﻿package com.a0soft.gphone.camonitor.log
+package com.a0soft.gphone.camonitor.log
 
 import android.content.Context
 import android.util.Log
@@ -11,7 +11,9 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.io.BufferedWriter
 import java.io.File
 import java.io.FileWriter
 import java.io.PrintWriter
@@ -24,12 +26,14 @@ object AppLogger {
 
     private val logScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val logChannel = Channel<LogEntry>(Channel.UNLIMITED)
+    private val diskLock = Any()
 
     private val _logsFlow = MutableStateFlow<List<LogEntry>>(emptyList())
     val logsFlow: StateFlow<List<LogEntry>> = _logsFlow.asStateFlow()
 
     private var logDir: File? = null
     private var activeLogFile: File? = null
+    private var activeWriter: PrintWriter? = null
 
     fun init(context: Context) {
         val dir = context.getExternalFilesDir("logs") ?: File(context.filesDir, "logs")
@@ -74,34 +78,57 @@ object AppLogger {
             message = message
         )
 
-        // Update in-memory flow for Compose UI
-        val current = _logsFlow.value
-        val updated = if (current.size >= MAX_MEMORY_LOGS) {
-            current.drop(1) + entry
-        } else {
-            current + entry
+        // Atomic update for in-memory flow for Compose UI
+        _logsFlow.update { current ->
+            if (current.size >= MAX_MEMORY_LOGS) {
+                current.drop(1) + entry
+            } else {
+                current + entry
+            }
         }
-        _logsFlow.value = updated
 
         // Queue for disk persistence
         logChannel.trySend(entry)
     }
 
-    private fun writeEntryToDisk(entry: LogEntry) {
-        val file = activeLogFile ?: return
+    private fun closeActiveWriterLocked() {
         try {
-            if (file.exists() && file.length() >= MAX_FILE_SIZE_BYTES) {
-                rotateLogFiles()
-            }
-            PrintWriter(FileWriter(file, true)).use { writer ->
-                writer.println(entry.format())
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed writing log to disk", e)
+            activeWriter?.flush()
+            activeWriter?.close()
+        } catch (_: Exception) {
+        } finally {
+            activeWriter = null
         }
     }
 
-    private fun rotateLogFiles() {
+    private fun getOrOpenWriterLocked(file: File): PrintWriter {
+        var writer = activeWriter
+        if (writer == null || !file.exists()) {
+            closeActiveWriterLocked()
+            writer = PrintWriter(BufferedWriter(FileWriter(file, true), 8192), true)
+            activeWriter = writer
+        }
+        return writer
+    }
+
+    private fun writeEntryToDisk(entry: LogEntry) {
+        val file = activeLogFile ?: return
+        synchronized(diskLock) {
+            try {
+                if (file.exists() && file.length() >= MAX_FILE_SIZE_BYTES) {
+                    closeActiveWriterLocked()
+                    rotateLogFilesLocked()
+                }
+                val writer = getOrOpenWriterLocked(file)
+                writer.println(entry.format())
+            } catch (e: Exception) {
+                closeActiveWriterLocked()
+                Log.e(TAG, "Failed writing log to disk", e)
+            }
+        }
+    }
+
+    private fun rotateLogFilesLocked() {
         val dir = logDir ?: return
         try {
             // Delete oldest if it exists
@@ -132,15 +159,18 @@ object AppLogger {
 
     fun clearLogs() {
         logScope.launch {
-            try {
-                activeLogFile?.delete()
-                val dir = logDir
-                if (dir != null && dir.exists()) {
-                    dir.listFiles()?.forEach { if (it.name.startsWith("cammonitor")) it.delete() }
+            synchronized(diskLock) {
+                try {
+                    closeActiveWriterLocked()
+                    activeLogFile?.delete()
+                    val dir = logDir
+                    if (dir != null && dir.exists()) {
+                        dir.listFiles()?.forEach { if (it.name.startsWith("cammonitor")) it.delete() }
+                    }
+                    _logsFlow.value = emptyList()
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to clear logs", e)
                 }
-                _logsFlow.value = emptyList()
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to clear logs", e)
             }
         }
     }

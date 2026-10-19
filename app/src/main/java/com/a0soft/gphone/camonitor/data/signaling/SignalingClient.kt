@@ -52,9 +52,24 @@ class MqttSignalingClient(
     private var reconnectJob: Job? = null
     private val connectMutex = Mutex()
 
+    data class BrokerEndpoint(
+        val host: String,
+        val port: Int,
+        val useSsl: Boolean
+    )
+
     companion object {
         const val PRIMARY_BROKER_HOST = "broker.hivemq.com"
+        const val FALLBACK_BROKER_HOST = "broker.emqx.io"
+        const val TLS_BROKER_PORT = 8883
         const val PRIMARY_BROKER_PORT = 1883
+
+        val BROKER_ENDPOINTS = listOf(
+            BrokerEndpoint(PRIMARY_BROKER_HOST, TLS_BROKER_PORT, useSsl = true),
+            BrokerEndpoint(PRIMARY_BROKER_HOST, PRIMARY_BROKER_PORT, useSsl = false),
+            BrokerEndpoint(FALLBACK_BROKER_HOST, TLS_BROKER_PORT, useSsl = true),
+            BrokerEndpoint(FALLBACK_BROKER_HOST, PRIMARY_BROKER_PORT, useSsl = false)
+        )
     }
 
     init {
@@ -105,24 +120,28 @@ class MqttSignalingClient(
         return success
     }
 
-    private suspend fun resolveHostCandidates(host: String): List<String> = withContext(Dispatchers.IO) {
+    private suspend fun resolveHostAddresses(host: String): List<java.net.InetAddress> = withContext(Dispatchers.IO) {
         try {
             val addresses = java.net.InetAddress.getAllByName(host)
-            val ipv4List = addresses.filterIsInstance<java.net.Inet4Address>().mapNotNull { it.hostAddress }
-            val ipv6List = addresses.filterIsInstance<java.net.Inet6Address>().mapNotNull { it.hostAddress }
-            // Dual-stack cellular networks prefer IPv6 by default, but some public MQTT brokers 
+            val ipv4List = addresses.filterIsInstance<java.net.Inet4Address>().map {
+                java.net.InetAddress.getByAddress(host, it.address)
+            }
+            val ipv6List = addresses.filterIsInstance<java.net.Inet6Address>().map {
+                java.net.InetAddress.getByAddress(host, it.address)
+            }
+            // Dual-stack cellular networks prefer IPv6 by default, but some public MQTT brokers
             // (e.g. broker.hivemq.com) have broken/refused AAAA endpoints on port 1883/8883.
-            // Prefer IPv4 addresses first to ensure robust cellular & Wi-Fi connectivity.
+            // Prefer IPv4 addresses first while preserving hostname for TLS SNI verification.
             val candidates = ipv4List + ipv6List
             if (candidates.isNotEmpty()) {
-                AppLogger.d(tag, "Resolved $host candidates: $candidates")
+                AppLogger.d(tag, "Resolved $host candidates: ${candidates.map { it.hostAddress }}")
                 candidates
             } else {
-                listOf(host)
+                emptyList()
             }
         } catch (e: Exception) {
             AppLogger.w(tag, "Failed DNS resolution for $host: ${e.message}, using raw hostname")
-            listOf(host)
+            emptyList()
         }
     }
 
@@ -137,36 +156,45 @@ class MqttSignalingClient(
         activeClient = null
 
         val currentGen = ++clientGeneration
-        val candidates = resolveHostCandidates(PRIMARY_BROKER_HOST)
-        AppLogger.i(tag, "Attempting connection to $PRIMARY_BROKER_HOST:$PRIMARY_BROKER_PORT (candidates=$candidates, gen=$currentGen)...")
+        val resolvedCache = mutableMapOf<String, List<java.net.InetAddress>>()
 
-        var success = false
-        for (targetHost in candidates) {
-            success = try {
-                withTimeoutOrNull(8_000L) {
-                    attemptConnect(targetHost, PRIMARY_BROKER_PORT, false, topic, currentGen)
-                } ?: false
-            } catch (e: Exception) {
-                AppLogger.w(tag, "Connection error for $targetHost: ${e.message}")
-                false
+        for (endpoint in BROKER_ENDPOINTS) {
+            if (!isListeningWanted) break
+            val addresses = resolvedCache.getOrPut(endpoint.host) {
+                resolveHostAddresses(endpoint.host)
             }
-            if (success) {
-                AppLogger.i(tag, "Successfully connected to $targetHost:$PRIMARY_BROKER_PORT (host=$PRIMARY_BROKER_HOST, gen=$currentGen)")
-                break
+            val targetAddresses: List<java.net.InetSocketAddress> = if (addresses.isNotEmpty()) {
+                addresses.map { java.net.InetSocketAddress(it, endpoint.port) }
+            } else {
+                listOf(java.net.InetSocketAddress.createUnresolved(endpoint.host, endpoint.port))
+            }
+
+            AppLogger.i(tag, "Attempting connection to ${endpoint.host}:${endpoint.port} (tls=${endpoint.useSsl}, candidates=${targetAddresses.size}, gen=$currentGen)...")
+
+            for (socketAddress in targetAddresses) {
+                val success = try {
+                    withTimeoutOrNull(8_000L) {
+                        attemptConnect(socketAddress, endpoint.host, endpoint.port, endpoint.useSsl, topic, currentGen)
+                    } ?: false
+                } catch (e: Exception) {
+                    AppLogger.w(tag, "Connection error for $socketAddress: ${e.message}")
+                    false
+                }
+                if (success) {
+                    AppLogger.i(tag, "Successfully connected to $socketAddress (tls=${endpoint.useSsl}, gen=$currentGen)")
+                    _isConnectedFlow.value = true
+                    return@withLock true
+                }
             }
         }
 
-        if (success) {
-            _isConnectedFlow.value = true
-            return@withLock true
-        } else {
-            AppLogger.w(tag, "All candidate connection attempts failed for $PRIMARY_BROKER_HOST:$PRIMARY_BROKER_PORT (gen=$currentGen)")
-            _isConnectedFlow.value = false
-            return@withLock false
-        }
+        AppLogger.w(tag, "All broker endpoint connection attempts failed (gen=$currentGen)")
+        _isConnectedFlow.value = false
+        return@withLock false
     }
 
     private suspend fun attemptConnect(
+        socketAddress: java.net.InetSocketAddress,
         host: String,
         port: Int,
         useSsl: Boolean,
@@ -180,18 +208,23 @@ class MqttSignalingClient(
             val builder = MqttClient.builder()
                 .useMqttVersion3()
                 .identifier(clientId)
-                .serverHost(host)
-                .serverPort(port)
+                .apply {
+                    if (socketAddress.isUnresolved) {
+                        serverHost(host).serverPort(port)
+                    } else {
+                        serverAddress(socketAddress)
+                    }
+                }
                 .addConnectedListener {
                     if (generation == clientGeneration) {
                         hasEverConnected = true
-                        AppLogger.i(tag, "MQTT connected callback (gen=$generation, host=$host)")
+                        AppLogger.i(tag, "MQTT connected callback (gen=$generation, host=$host:$port, tls=$useSsl)")
                         _isConnectedFlow.value = true
                     }
                 }
                 .addDisconnectedListener { context ->
                     if (generation == clientGeneration && hasEverConnected) {
-                        AppLogger.w(tag, "MQTT disconnected (gen=$generation, host=$host): ${context.cause.message}")
+                        AppLogger.w(tag, "MQTT disconnected (gen=$generation, host=$host:$port): ${context.cause.message}")
                         _isConnectedFlow.value = false
                         if (isListeningWanted) {
                             val deviceId = securityRepository.getDeviceId()

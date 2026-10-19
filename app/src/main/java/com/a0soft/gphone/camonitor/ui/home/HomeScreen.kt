@@ -44,6 +44,7 @@ fun HomeScreen(
     var showRenameDialog by remember { mutableStateOf(false) }
     var showSelectCameraDialog by remember { mutableStateOf(false) }
     var showLanguageDialog by remember { mutableStateOf(false) }
+    var showTurnDialog by remember { mutableStateOf(false) }
     var pairedViewers by remember { mutableStateOf(securityRepo.getPairedViewers()) }
     var pairedCameras by remember { mutableStateOf(securityRepo.getPairedCameras()) }
 
@@ -267,6 +268,9 @@ fun HomeScreen(
             TopAppBar(
                 title = { Text(stringResource(R.string.app_name), style = MaterialTheme.typography.titleLarge) },
                 actions = {
+                    IconButton(onClick = { showTurnDialog = true }) {
+                        Icon(Icons.Default.Dns, contentDescription = stringResource(R.string.turn_settings_title))
+                    }
                     IconButton(onClick = { showLanguageDialog = true }) {
                         Icon(Icons.Default.Language, contentDescription = stringResource(R.string.cd_language_settings))
                     }
@@ -547,6 +551,87 @@ fun HomeScreen(
             dismissButton = {
                 TextButton(onClick = { showLanguageDialog = false }) {
                     Text(stringResource(R.string.action_cancel))
+                }
+            }
+        )
+    }
+
+    if (showTurnDialog) {
+        val currentTurn = remember { securityRepo.getTurnServerConfig() }
+        var turnUrl by remember { mutableStateOf(currentTurn.url) }
+        var turnUser by remember { mutableStateOf(currentTurn.username) }
+        var turnPass by remember { mutableStateOf(currentTurn.credential) }
+
+        AlertDialog(
+            onDismissRequest = { showTurnDialog = false },
+            title = { Text(stringResource(R.string.turn_settings_title)) },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        text = stringResource(R.string.turn_settings_description),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    OutlinedTextField(
+                        value = turnUrl,
+                        onValueChange = { turnUrl = it },
+                        label = { Text(stringResource(R.string.turn_url_label)) },
+                        placeholder = { Text("turn:your.server.com:3478") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = turnUser,
+                        onValueChange = { turnUser = it },
+                        label = { Text(stringResource(R.string.turn_username_label)) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = turnPass,
+                        onValueChange = { turnPass = it },
+                        label = { Text(stringResource(R.string.turn_credential_label)) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        securityRepo.setTurnServerConfig(
+                            com.a0soft.gphone.camonitor.data.model.TurnServerConfig(
+                                url = turnUrl.trim(),
+                                username = turnUser.trim(),
+                                credential = turnPass
+                            )
+                        )
+                        showTurnDialog = false
+                    }
+                ) {
+                    Text(stringResource(R.string.action_save))
+                }
+            },
+            dismissButton = {
+                Row {
+                    if (turnUrl.isNotBlank() || turnUser.isNotBlank() || turnPass.isNotBlank()) {
+                        TextButton(
+                            onClick = {
+                                securityRepo.setTurnServerConfig(com.a0soft.gphone.camonitor.data.model.TurnServerConfig())
+                                showTurnDialog = false
+                            }
+                        ) {
+                            Text(stringResource(R.string.action_clear), color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                    TextButton(onClick = { showTurnDialog = false }) {
+                        Text(stringResource(R.string.action_cancel))
+                    }
                 }
             }
         )

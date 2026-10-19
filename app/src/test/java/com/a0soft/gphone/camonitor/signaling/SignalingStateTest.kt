@@ -102,4 +102,25 @@ class SignalingStateTest {
         onDisconnect(2L)
         assertFalse("Current generation disconnect must update connected state to false", isConnectedFlow.value)
     }
+
+    @Test
+    fun testBrokerEndpointsPrioritizePrimaryTlsBeforeFallback() {
+        val endpoints = com.a0soft.gphone.camonitor.data.signaling.MqttSignalingClient.BROKER_ENDPOINTS
+        assertEquals(4, endpoints.size)
+        assertEquals("broker.hivemq.com", endpoints[0].host)
+        assertEquals(8883, endpoints[0].port)
+        assertTrue(endpoints[0].useSsl)
+
+        assertEquals("broker.hivemq.com", endpoints[1].host)
+        assertEquals(1883, endpoints[1].port)
+        assertFalse(endpoints[1].useSsl)
+
+        assertEquals("broker.emqx.io", endpoints[2].host)
+        assertEquals(8883, endpoints[2].port)
+        assertTrue(endpoints[2].useSsl)
+
+        assertEquals("broker.emqx.io", endpoints[3].host)
+        assertEquals(1883, endpoints[3].port)
+        assertFalse(endpoints[3].useSsl)
+    }
 }

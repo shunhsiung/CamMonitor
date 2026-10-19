@@ -100,10 +100,15 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     private fun CamMonitorAppContent() {
-        val backStack = remember { mutableStateListOf(AppScreen.HOME) }
+        val backStack = androidx.compose.runtime.saveable.rememberSaveable(
+            saver = androidx.compose.runtime.saveable.listSaver(
+                save = { list -> list.map { it.name } },
+                restore = { saved -> saved.mapNotNull { runCatching { AppScreen.valueOf(it) }.getOrNull() }.toMutableStateList().apply { if (isEmpty()) add(AppScreen.HOME) } }
+            )
+        ) { mutableStateListOf(AppScreen.HOME) }
         val currentScreen = backStack.lastOrNull() ?: AppScreen.HOME
         val securityRepo = remember { CamMonitorApp.instance.securityRepository }
-        var selectedCameraDeviceId by remember { mutableStateOf<String?>(null) }
+        var selectedCameraDeviceId by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf<String?>(null) }
 
         fun navigateTo(screen: AppScreen) {
             backStack.add(screen)

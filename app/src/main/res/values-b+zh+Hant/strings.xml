@@ -138,4 +138,12 @@
     <string name="about_open_source_notice">本專案採 Apache 2.0 授權條款開放原始碼。</string>
     <string name="about_view_on_github">在 GitHub 上檢視專案</string>
     <string name="about_github_url">https://github.com/samlu/CamMonitor</string>
+
+    <!-- Custom TURN / STUN Settings -->
+    <string name="turn_settings_title">自訂 TURN / STUN 伺服器</string>
+    <string name="turn_settings_description">選填：設定自訂 TURN 伺服器（例如 turn:host:3478）以解決跨電信行動網路對稱型 NAT 穿透問題。</string>
+    <string name="turn_url_label">伺服器網址 (turn: 或 turns:)</string>
+    <string name="turn_username_label">帳號 Username（選填）</string>
+    <string name="turn_credential_label">密碼 Credential（選填）</string>
+    <string name="action_clear">清除</string>
 </resources>

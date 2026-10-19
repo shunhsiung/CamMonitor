@@ -82,7 +82,7 @@ fun CameraPairingScreen(
                 )
                 val added = securityRepo.addPairedDevice(newViewer, maxLimit = SecurityRepository.MAX_PAIRED_VIEWERS)
                 if (added) {
-                    // Send PAIR_CONFIRM
+                    // Send PAIR_CONFIRM (with a second burst for lossy networks before closing OTP)
                     val confirm = SignalingMessage.PairConfirm(
                         paDeviceId = deviceId,
                         paName = cameraName,
@@ -98,7 +98,10 @@ fun CameraPairingScreen(
                     if (sent) {
                         AppLogger.i("CameraPairing", "PAIR_CONFIRM transmitted successfully to ${msg.pbDeviceId}")
                     }
-                    delay(500L)
+                    delay(350L)
+                    signalingClient.sendSignalingMessage(msg.pbDeviceId, confirm, otpKey)
+                    delay(250L)
+                    securityRepo.clearPairingOtp()
                     onPairingSuccess()
                 }
             }

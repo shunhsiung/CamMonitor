@@ -138,4 +138,12 @@
     <string name="about_open_source_notice">This app is open source under the Apache 2.0 License.</string>
     <string name="about_view_on_github">View on GitHub</string>
     <string name="about_github_url">https://github.com/samlu/CamMonitor</string>
+
+    <!-- Custom TURN / STUN Settings -->
+    <string name="turn_settings_title">Custom TURN / STUN Server</string>
+    <string name="turn_settings_description">Optional: Configure a TURN server (e.g., turn:host:3478) to traverse Carrier Symmetric NAT across cellular networks.</string>
+    <string name="turn_url_label">Server URL (turn: or turns:)</string>
+    <string name="turn_username_label">Username (Optional)</string>
+    <string name="turn_credential_label">Password / Credential (Optional)</string>
+    <string name="action_clear">Clear</string>
 </resources>

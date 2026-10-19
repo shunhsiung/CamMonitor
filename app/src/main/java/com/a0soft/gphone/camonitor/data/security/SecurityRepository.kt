@@ -48,6 +48,8 @@ interface SecurityRepository {
     fun setViewerAudioPlaybackEnabled(enabled: Boolean)
     fun getNightModeSetting(): com.a0soft.gphone.camonitor.data.model.NightModeSetting = com.a0soft.gphone.camonitor.data.model.NightModeSetting.AUTO
     fun setNightModeSetting(setting: com.a0soft.gphone.camonitor.data.model.NightModeSetting) {}
+    fun getTurnServerConfig(): com.a0soft.gphone.camonitor.data.model.TurnServerConfig = com.a0soft.gphone.camonitor.data.model.TurnServerConfig()
+    fun setTurnServerConfig(config: com.a0soft.gphone.camonitor.data.model.TurnServerConfig) {}
 }
 
 class DefaultSecurityRepository(
@@ -201,16 +203,20 @@ class DefaultSecurityRepository(
 
     override fun addPairedDevice(device: PairedDevice, maxLimit: Int): Boolean {
         val current = getPairedDevices().toMutableList()
-        if (current.size >= maxLimit && current.none { it.deviceId == device.deviceId }) {
-            AppLogger.w("SecurityRepository", "Cannot add paired device: Max $maxLimit devices reached")
+        val sameRoleCount = when (device.role) {
+            "VIEWER" -> current.count { it.role != "CAMERA" }
+            "CAMERA" -> current.count { it.role != "VIEWER" }
+            else -> current.size
+        }
+        if (sameRoleCount >= maxLimit && current.none { it.deviceId == device.deviceId }) {
+            AppLogger.w("SecurityRepository", "Cannot add paired device: Max $maxLimit devices reached for role=${device.role ?: "ANY"}")
             return false
         }
         current.removeAll { it.deviceId == device.deviceId }
         current.add(device)
 
         savePairedDevices(current)
-        clearPairingOtp()
-        AppLogger.i("SecurityRepository", "Paired new device: ${device.name} (${device.deviceId}) [count=${current.size}/$maxLimit]")
+        AppLogger.i("SecurityRepository", "Paired new device: ${device.name} (${device.deviceId}, role=${device.role}) [roleCount=${sameRoleCount + 1}/$maxLimit]")
         return true
     }
 
@@ -290,17 +296,18 @@ class DefaultSecurityRepository(
             CryptoUtils.publicKeyFromBase64(senderDevice.publicKeyBase64)
         } else {
             // Unpaired sender is only permitted if an active OTP is set (handshake flow)
-            if (activeOtp == null) {
+            if (getActivePairingOtp() == null) {
                 AppLogger.w("SecurityRepository", "Envelope discarded: Sender not in whitelist (${envelope.senderId})")
                 return null
             }
             null
         }
 
-        // 4. Signature Verification (if public key is known and not in OTP handshake flow)
+        val sigPayload = "${envelope.senderId}${envelope.recipientId}${envelope.timestamp}${envelope.nonce}${envelope.ciphertext}"
+            .toByteArray(Charsets.UTF_8)
+
+        // 4. Signature Verification (if public key is already known and not in OTP handshake flow)
         if (senderPublicKey != null && !isOtpKey) {
-            val sigPayload = "${envelope.senderId}${envelope.recipientId}${envelope.timestamp}${envelope.nonce}${envelope.ciphertext}"
-                .toByteArray(Charsets.UTF_8)
             val isValid = CryptoUtils.verify(sigPayload, envelope.signature, senderPublicKey)
             if (!isValid) {
                 AppLogger.w("SecurityRepository", "Envelope discarded: Invalid signature from ${envelope.senderId}")
@@ -321,9 +328,33 @@ class DefaultSecurityRepository(
             return null
         }
 
+        val decryptedJson = String(decryptedBytes, Charsets.UTF_8)
+
+        // 6. Proof-of-Possession Signature Verification during OTP Pairing Handshake
+        if (isOtpKey || senderPublicKey == null) {
+            val handshakeMsg = com.a0soft.gphone.camonitor.data.model.SignalingMessage.fromJson(decryptedJson)
+            val embeddedPubKeyBase64 = when (handshakeMsg) {
+                is com.a0soft.gphone.camonitor.data.model.SignalingMessage.PairRequest -> handshakeMsg.pbPublicKeyBase64
+                is com.a0soft.gphone.camonitor.data.model.SignalingMessage.PairConfirm -> handshakeMsg.paPublicKeyBase64
+                else -> senderDevice?.publicKeyBase64
+            }
+            if (embeddedPubKeyBase64 != null) {
+                val verified = try {
+                    val embeddedPubKey = CryptoUtils.publicKeyFromBase64(embeddedPubKeyBase64)
+                    CryptoUtils.verify(sigPayload, envelope.signature, embeddedPubKey)
+                } catch (e: Exception) {
+                    false
+                }
+                if (!verified) {
+                    AppLogger.w("SecurityRepository", "Handshake envelope discarded: Invalid proof-of-possession signature from ${envelope.senderId}")
+                    return null
+                }
+            }
+        }
+
         // Only register nonce upon successful verification and decryption
         seenNonces[envelope.nonce] = envelope.timestamp
-        return String(decryptedBytes, Charsets.UTF_8)
+        return decryptedJson
     }
 
     override fun isViewerAudioPlaybackEnabled(): Boolean {
@@ -348,6 +379,23 @@ class DefaultSecurityRepository(
     override fun setNightModeSetting(setting: com.a0soft.gphone.camonitor.data.model.NightModeSetting) {
         prefs.edit().putString("night_mode_setting", setting.name).apply()
         AppLogger.i("SecurityRepository", "Night mode setting persisted: $setting")
+    }
+
+    override fun getTurnServerConfig(): com.a0soft.gphone.camonitor.data.model.TurnServerConfig {
+        return com.a0soft.gphone.camonitor.data.model.TurnServerConfig(
+            url = prefs.getString("turn_server_url", "") ?: "",
+            username = prefs.getString("turn_server_username", "") ?: "",
+            credential = prefs.getString("turn_server_credential", "") ?: ""
+        )
+    }
+
+    override fun setTurnServerConfig(config: com.a0soft.gphone.camonitor.data.model.TurnServerConfig) {
+        prefs.edit()
+            .putString("turn_server_url", config.url.trim())
+            .putString("turn_server_username", config.username.trim())
+            .putString("turn_server_credential", config.credential)
+            .apply()
+        AppLogger.i("SecurityRepository", "TURN server config updated (configured=${config.isConfigured})")
     }
 
     private fun cleanOldNonces(now: Long) {
